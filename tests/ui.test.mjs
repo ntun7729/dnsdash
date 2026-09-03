@@ -1,10 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';
-import { dashboardApp } from '../src/app.js';
+import worker from '../src/index.js';
 import { dashboardPage } from '../src/ui.js';
-
-const APP_SCRIPT = `(${dashboardApp.toString()})();`;
 
 function profilePayload() {
   const dns = (type, answers, inspection = { serviceBindings: [], echAvailable: false, echConfigs: [] }) => ({
@@ -18,112 +15,62 @@ function profilePayload() {
     answers,
     inspection
   });
-
-  const echInspection = {
+  const inspection = {
     echAvailable: true,
-    serviceBindings: [{
-      mode: 'service',
-      priority: 1,
-      target: '.',
-      params: {
-        alpn: ['h3', 'h2'],
-        ipv4hint: ['104.16.1.2'],
-        ipv6hint: ['2606:4700::1'],
-        ech: { base64: 'AAECAwQ=' }
-      }
-    }],
-    echConfigs: [{
-      versionHex: '0xfe0d',
-      supportedVersion: true,
-      configId: 7,
-      publicName: 'cloudflare-ech.com',
-      kem: 'DHKEM(X25519, HKDF-SHA256)',
-      publicKeyBytes: 32,
-      maximumNameLength: 0,
-      extensions: [],
-      cipherSuites: [{ kdf: 'HKDF-SHA256', aead: 'AES-128-GCM' }]
-    }]
+    serviceBindings: [{ mode: 'service', priority: 1, target: '.', params: { alpn: ['h3','h2'], ipv4hint: ['104.16.1.2'], ipv6hint: ['2606:4700::1'], ech: { base64: 'AAECAwQ=' } } }],
+    echConfigs: [{ versionHex: '0xfe0d', supportedVersion: true, configId: 7, publicName: 'cloudflare-ech.com', kem: 'DHKEM(X25519, HKDF-SHA256)', publicKeyBytes: 32, maximumNameLength: 0, extensions: [], cipherSuites: [{ kdf: 'HKDF-SHA256', aead: 'AES-128-GCM' }] }]
   };
-
   return {
-    name: 'cloudflare-ech.com',
-    elapsedMs: 17,
-    dnssecRequested: true,
+    name: 'cloudflare-ech.com', elapsedMs: 17, dnssecRequested: true, errors: {},
     records: {
       A: dns('A', [{ name: 'cloudflare-ech.com', type: 1, typeName: 'A', ttl: 120, parsed: { address: '104.16.1.2' } }]),
       AAAA: dns('AAAA', [{ name: 'cloudflare-ech.com', type: 28, typeName: 'AAAA', ttl: 120, parsed: { address: '2606:4700::1' } }]),
-      HTTPS: dns('HTTPS', [{ name: 'cloudflare-ech.com', type: 65, typeName: 'HTTPS', ttl: 120, parsed: { priority: 1, target: '.' } }], echInspection)
+      HTTPS: dns('HTTPS', [{ name: 'cloudflare-ech.com', type: 65, typeName: 'HTTPS', ttl: 120, parsed: { priority: 1, target: '.' } }], inspection)
     },
-    errors: {},
-    summary: {
-      ipv4: ['104.16.1.2'],
-      ipv6: ['2606:4700::1'],
-      alpn: ['h3', 'h2'],
-      echAvailable: true,
-      echConfigs: echInspection.echConfigs
-    }
+    summary: { ipv4: ['104.16.1.2'], ipv6: ['2606:4700::1'], alpn: ['h3','h2'], echAvailable: true, echConfigs: inspection.echConfigs }
   };
 }
 
-async function waitFor(predicate, timeoutMs = 800) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    if (predicate()) return;
-    await new Promise(resolve => setTimeout(resolve, 5));
-  }
-  throw new Error('condition did not become true');
-}
-
-test('dashboard runtime is inline, nonce protected and independent of /app.js loading', () => {
-  assert.doesNotThrow(() => new Function(APP_SCRIPT));
-  const html = dashboardPage(APP_SCRIPT, 'testnonce123');
-  assert.match(html, /<script nonce="testnonce123" data-cfasync="false">/);
-  assert.doesNotMatch(html, /<script[^>]+src=/);
-  assert.match(html, /Resolver ready/);
+test('dashboard core navigation and inspection work without JavaScript', () => {
+  const html = dashboardPage({
+    origin: 'https://dnsdash.example', mode: 'profile', name: 'cloudflare-ech.com', type: 'HTTPS',
+    health: { upstreams: ['cloudflare-dns.com','dns.google','dns.quad9.net'] }
+  });
+  assert.match(html, /<form class="query" method="get" action="\/">/);
+  assert.match(html, /name="run" value="1"/);
+  assert.match(html, /href="\/\?run=1&amp;mode=profile&amp;name=google\.com/);
+  assert.match(html, />Google<\/a>/);
+  assert.match(html, /Dashboard ready/);
+  assert.match(html, /https:\/\/dnsdash\.example\/dns-query/);
+  assert.match(html, /href="\/doh\.txt"/);
+  assert.match(html, /href="\/ech-helper\.txt"/);
 });
 
-test('final HTML document boots, resolves health/profile, renders DNS cards and ECH', async () => {
-  const dom = new JSDOM(dashboardPage(APP_SCRIPT, 'testnonce123'), {
-    url: 'https://dnsdash.example/',
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    beforeParse(window) {
-      window.fetch = async (input) => {
-        const url = new URL(String(input), 'https://dnsdash.example/');
-        if (url.pathname === '/health') {
-          return { ok: true, json: async () => ({ ok: true, upstreams: ['cloudflare-dns.com'] }) };
-        }
-        if (url.pathname === '/api/profile') {
-          return { ok: true, json: async () => profilePayload() };
-        }
-        throw new Error('unexpected fetch ' + url.pathname);
-      };
-      Object.defineProperty(window.navigator, 'clipboard', {
-        configurable: true,
-        value: { writeText: async () => {} }
-      });
-    }
+test('dashboard renders DNS records and ECH completely on the server', () => {
+  const html = dashboardPage({
+    origin: 'https://dnsdash.example', mode: 'profile', name: 'cloudflare-ech.com', type: 'HTTPS',
+    health: { upstreams: ['cloudflare-dns.com'] }, result: profilePayload()
   });
+  assert.match(html, /17 ms/);
+  assert.match(html, /NOERROR/);
+  assert.match(html, /104\.16\.1\.2/);
+  assert.match(html, /2606:4700::1/);
+  assert.match(html, /h3, h2/);
+  assert.match(html, /ECH advertised/);
+  assert.match(html, /DHKEM\(X25519, HKDF-SHA256\)/);
+  assert.match(html, /Server rendered/);
+});
 
-  try {
-    await waitFor(() => dom.window.document.getElementById('healthText').textContent === 'Resolver ready');
-    await waitFor(() => dom.window.document.getElementById('latency').textContent === '17 ms');
+test('Worker root shell and endpoint text helpers require no client script', async () => {
+  const env = { UPSTREAM_DOH: 'https://cloudflare-dns.com/dns-query', UPSTREAM_DOH_FALLBACKS: 'https://dns.google/dns-query,https://dns.quad9.net/dns-query', DNS_TIMEOUT_MS: '6000' };
+  const root = await worker.fetch(new Request('https://dnsdash.example/'), env);
+  assert.equal(root.status, 200);
+  const html = await root.text();
+  assert.match(html, /Core controls work without JavaScript/);
+  assert.match(html, /method="get"/);
 
-    assert.equal(dom.window.document.getElementById('healthText').textContent, 'Resolver ready');
-    assert.match(dom.window.document.getElementById('resolverList').textContent, /primary · cloudflare-dns\.com/);
-    assert.equal(dom.window.document.getElementById('rcode').textContent, 'NOERROR');
-    assert.equal(dom.window.document.getElementById('dnssec').textContent, 'AD');
-    assert.equal(dom.window.document.getElementById('answersCount').textContent, '3');
-    assert.match(dom.window.document.getElementById('answerCards').textContent, /104\.16\.1\.2/);
-    assert.match(dom.window.document.getElementById('answerCards').textContent, /HTTPS/);
-    assert.match(dom.window.document.getElementById('echArea').textContent, /ECH advertised/);
-    assert.match(dom.window.document.getElementById('echArea').textContent, /cloudflare-ech\.com/);
-    assert.doesNotMatch(dom.window.document.body.textContent, /Loading…/);
-
-    const googleButton = [...dom.window.document.querySelectorAll('.chip')].find(el => el.textContent === 'Google');
-    googleButton.click();
-    assert.equal(dom.window.document.getElementById('name').value, 'google.com');
-  } finally {
-    dom.window.close();
-  }
+  const doh = await worker.fetch(new Request('https://dnsdash.example/doh.txt'), env);
+  assert.equal(await doh.text(), 'https://dnsdash.example/dns-query\n');
+  const ech = await worker.fetch(new Request('https://dnsdash.example/ech-helper.txt'), env);
+  assert.equal(await ech.text(), 'cloudflare-ech.com+https://dnsdash.example/dns-query\n');
 });
