@@ -76,11 +76,20 @@ jobs:
 
           grep -Fq 'DNS Dash' /tmp/dnsdash-home.html
           grep -Fq 'DoH endpoint' /tmp/dnsdash-home.html
-          grep -Fq '/app.js?v=2.1.0' /tmp/dnsdash-home.html
+          grep -Fq 'data-cfasync="false"' /tmp/dnsdash-home.html
+          if grep -Fq '<script src=' /tmp/dnsdash-home.html; then
+            echo 'dashboard unexpectedly depends on external script loading'
+            exit 1
+          fi
 
-          curl -kfsS 'https://127.0.0.1:8787/app.js?v=2.1.0' > /tmp/dnsdash-app.js
-          test -s /tmp/dnsdash-app.js
-          node --check /tmp/dnsdash-app.js
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const html = readFileSync('/tmp/dnsdash-home.html', 'utf8');
+          const match = html.match(/<script nonce="[^"]+" data-cfasync="false">([\s\S]*?)<\/script>/);
+          if (!match) throw new Error('inline dashboard runtime not found');
+          writeFileSync('/tmp/dnsdash-inline.js', match[1]);
+          NODE
+          node --check /tmp/dnsdash-inline.js
 
           curl -kfsS https://127.0.0.1:8787/health > /tmp/dnsdash-health.json
           grep -Fq '"ok":true' /tmp/dnsdash-health.json
