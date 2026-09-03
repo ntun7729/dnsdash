@@ -1,0 +1,61 @@
+name: Probe DNS Dash Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wait for server-rendered production build
+        shell: bash
+        run: |
+          set -uo pipefail
+          url='https://dnsdash.huggy.bond/'
+          ready=0
+          for attempt in $(seq 1 24); do
+            echo "production probe attempt $attempt"
+            if curl -fsS --max-time 15 -D /tmp/prod-headers "$url" -o /tmp/prod-home.html; then
+              echo '--- response headers ---'
+              cat /tmp/prod-headers
+              echo '--- page markers ---'
+              grep -Eo 'Dashboard ready|Core controls work without JavaScript|Checking resolver|UI active[^<]*' /tmp/prod-home.html | head -n 10 || true
+              if grep -Fq 'Core controls work without JavaScript' /tmp/prod-home.html; then
+                ready=1
+                break
+              fi
+            fi
+            sleep 5
+          done
+          if [ "$ready" != '1' ]; then
+            echo 'Production did not expose the DNS Dash 2.2 marker.'
+            echo '--- final headers ---'
+            cat /tmp/prod-headers 2>/dev/null || true
+            echo '--- final HTML head ---'
+            sed -n '1,80p' /tmp/prod-home.html 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Probe production routes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fsS --max-time 20 'https://dnsdash.huggy.bond/health' -o /tmp/health.json
+          cat /tmp/health.json
+          grep -Fq '"ok":true' /tmp/health.json
+
+          curl -fsS --max-time 20 'https://dnsdash.huggy.bond/doh.txt' -o /tmp/doh.txt
+          cat /tmp/doh.txt
+          grep -Fq 'https://dnsdash.huggy.bond/dns-query' /tmp/doh.txt
+
+          curl -fsS --max-time 30 'https://dnsdash.huggy.bond/?run=1&mode=record&name=example.com&type=A' -o /tmp/result.html
+          grep -Fq 'Server rendered' /tmp/result.html
+          grep -Fq 'NOERROR' /tmp/result.html
+          grep -Fq 'example.com' /tmp/result.html
+          echo 'Production server-rendered DNS result passed.'
