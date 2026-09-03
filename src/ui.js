@@ -1,4 +1,6 @@
-export function dashboardPage() {
+export function dashboardPage(appScript = '', nonce = '') {
+  const safeNonce = String(nonce || '').replace(/[^A-Za-z0-9_-]/g, '');
+  const embeddedScript = String(appScript || '').replace(/<\/script/gi, '<\\/script');
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -65,7 +67,7 @@ export function dashboardPage() {
 
   <div class="footer">DNS Dash stores no application-level query history or ECH keys.</div>
 </div>
-<script src="/app.js?v=2.1.0" defer></script>
+<script nonce="${safeNonce}" data-cfasync="false">${embeddedScript}</script>
 </body>
 </html>`;
 }
