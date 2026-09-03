@@ -18,12 +18,13 @@ export default {
 
       if (url.pathname === '/') {
         if (request.method !== 'GET') return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'GET' } });
-        return new Response(dashboardPage(), {
+        const nonce = crypto.randomUUID().replace(/-/g, '');
+        return new Response(dashboardPage(APP_SCRIPT, nonce), {
           status: 200,
           headers: {
             'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'no-cache, max-age=0, must-revalidate',
-            'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            'Cache-Control': 'no-store',
+            'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
             ...SECURITY_HEADERS
           }
         });
@@ -35,7 +36,7 @@ export default {
           status: 200,
           headers: {
             'Content-Type': 'text/javascript; charset=utf-8',
-            'Cache-Control': 'no-cache, max-age=0, must-revalidate',
+            'Cache-Control': 'no-store',
             ...SECURITY_HEADERS
           }
         });
