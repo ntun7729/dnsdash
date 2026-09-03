@@ -1,4 +1,5 @@
 import { handleDoh, handleProfileApi, handleResolveApi, healthPayload } from './dns.js';
+import { dashboardApp } from './app.js';
 import { dashboardPage } from './ui.js';
 
 const SECURITY_HEADERS = {
@@ -7,6 +8,8 @@ const SECURITY_HEADERS = {
   'X-Frame-Options': 'DENY',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()'
 };
+
+const APP_SCRIPT = `(${dashboardApp.toString()})();`;
 
 export default {
   async fetch(request, env) {
@@ -19,8 +22,20 @@ export default {
           status: 200,
           headers: {
             'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'public, max-age=300',
-            'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            'Cache-Control': 'no-cache, max-age=0, must-revalidate',
+            'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            ...SECURITY_HEADERS
+          }
+        });
+      }
+
+      if (url.pathname === '/app.js') {
+        if (request.method !== 'GET') return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'GET' } });
+        return new Response(APP_SCRIPT, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/javascript; charset=utf-8',
+            'Cache-Control': 'no-cache, max-age=0, must-revalidate',
             ...SECURITY_HEADERS
           }
         });
