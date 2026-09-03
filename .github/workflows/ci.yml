@@ -37,7 +37,7 @@ jobs:
             node --check "$file"
           done
 
-      - name: Unit tests
+      - name: Unit and DOM tests
         run: npm test
 
       - name: Bundle Worker
@@ -46,7 +46,7 @@ jobs:
       - name: Cloudflare dry run
         run: npm run cf:dry-run
 
-      - name: Local Worker and live DNS smoke test
+      - name: Local Worker, dashboard and live DNS smoke test
         shell: bash
         run: |
           cleanup() {
@@ -75,6 +75,11 @@ jobs:
 
           grep -q 'DNS Dash' /tmp/dnsdash-home.html
           grep -q '/dns-query' /tmp/dnsdash-home.html
+          grep -q '/app.js?v=2.1.0' /tmp/dnsdash-home.html
+
+          curl -kfsS https://127.0.0.1:8787/app.js?v=2.1.0 > /tmp/dnsdash-app.js
+          test -s /tmp/dnsdash-app.js
+          node --check /tmp/dnsdash-app.js
 
           curl -kfsS https://127.0.0.1:8787/health > /tmp/dnsdash-health.json
           grep -q '"ok":true' /tmp/dnsdash-health.json
@@ -128,6 +133,10 @@ jobs:
           curl -kfsS 'https://127.0.0.1:8787/api/resolve?name=cloudflare-ech.com&type=HTTPS&dnssec=1' > /tmp/dnsdash-ech.json
           grep -q '"statusName": "NOERROR"' /tmp/dnsdash-ech.json
           grep -q '"type": "HTTPS"' /tmp/dnsdash-ech.json
+
+          curl -kfsS 'https://127.0.0.1:8787/api/profile?name=cloudflare-ech.com&dnssec=1' > /tmp/dnsdash-profile.json
+          grep -q '"records"' /tmp/dnsdash-profile.json
+          grep -q '"HTTPS"' /tmp/dnsdash-profile.json
 
           cleanup
           WRANGLER_PID=''
