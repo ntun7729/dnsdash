@@ -1,34 +1,42 @@
 # DNS Dash
 
-DNS Dash is a focused Cloudflare Worker project with two jobs only:
+DNS Dash is a focused Cloudflare Worker DNS project. It does two things:
 
-- provide a standards-based DNS-over-HTTPS endpoint at `/dns-query`;
-- provide a small DNS inspection dashboard at `/`.
+- serves standards-based DNS-over-HTTPS at `/dns-query`;
+- serves a self-contained DNS inspection dashboard at `/`.
 
-There are no tunnel, proxy, subscription, or unrelated features in this repository.
+There are no tunnel, VLESS, proxy, subscription, VPN, or unrelated features in this repository.
+
+## DNS Dash 2
+
+Version 2 replaces the original dashboard's provider-specific JSON parsing with its own DNS wire codec.
+
+DNS Dash now builds DNS packets itself, sends wire-format DoH, validates the returned transaction and question, follows DNS compression pointers safely, decodes resource records, parses HTTPS/SVCB SvcParams from binary RDATA, and decodes RFC 9849 ECHConfigList structures.
+
+The dashboard and the public DoH endpoint therefore use the same DNS protocol core.
 
 ## Routes
 
 | Route | Purpose |
 |---|---|
 | `/` | DNS Dash web interface |
-| `/dns-query` | RFC 8484 DNS-over-HTTPS wire-format endpoint |
-| `/api/resolve?name=example.com&type=A` | JSON API used by the dashboard |
+| `/dns-query` | RFC 8484 DNS-over-HTTPS endpoint |
+| `/api/resolve?name=example.com&type=HTTPS` | One wire-format DNS lookup, normalized to JSON for the UI |
+| `/api/profile?name=example.com` | Parallel A + AAAA + HTTPS connection profile |
+| `/health` | Resolver-chain and capability status |
 
 Unknown routes return `404`.
 
 ## DNS-over-HTTPS
 
-The Worker supports the two RFC 8484 wire-format styles commonly used by DoH clients.
-
-### GET
+### GET from clients
 
 ```text
 GET /dns-query?dns=<base64url-dns-message>
 Accept: application/dns-message
 ```
 
-### POST
+### POST from clients
 
 ```text
 POST /dns-query
@@ -38,85 +46,140 @@ Accept: application/dns-message
 <raw DNS wire message>
 ```
 
-The Worker forwards the request to the configured upstream resolver and returns `application/dns-message` to the client.
+DNS Dash accepts both RFC 8484 forms. Internally it relays valid client requests upstream as POST `application/dns-message`, including when the client used GET. This keeps the DNS wire message out of the upstream URL.
 
-The default upstream is Cloudflare:
+Before accepting an upstream answer DNS Dash verifies that it is a DNS response and that its transaction ID and first question match the original request. A bad upstream response is not returned to the client.
+
+The default resolver is:
 
 ```text
 https://cloudflare-dns.com/dns-query
 ```
 
-Cloudflare documents both GET and POST DNS wire format at this endpoint. The dashboard separately uses the provider's JSON representation for human-readable inspection, while the actual `/dns-query` endpoint remains wire-format DNS.
+## Resolver fallback chain
 
-## Dashboard
+The Worker can use up to four HTTPS DoH upstreams in order.
 
-The root page lets you query:
+```toml
+[vars]
+UPSTREAM_DOH = "https://cloudflare-dns.com/dns-query"
+UPSTREAM_DOH_FALLBACKS = ""
+DNS_TIMEOUT_MS = "6000"
+```
+
+`UPSTREAM_DOH_FALLBACKS` is optional. It accepts comma- or newline-separated DoH URLs.
+
+Example:
+
+```text
+https://dns.google/dns-query,https://dns.quad9.net/dns-query
+```
+
+Fallback is triggered by transport failure, timeout, non-success HTTP status, an unexpected media type, a malformed DNS reply, a transaction-ID mismatch, or a question mismatch.
+
+Only HTTPS resolver URLs are accepted. Duplicate upstreams are removed and the list is bounded to four entries.
+
+## DNSSEC
+
+Dashboard queries request DNSSEC data by default with an EDNS OPT record and the DO bit set.
+
+The dashboard shows the returned AD flag so you can see whether the recursive resolver authenticated the answer. It also exposes the DNS header flags and normalized response in the raw details panel.
+
+The public `/dns-query` endpoint does not rewrite a client's DNS flags or EDNS options; it forwards the validated DNS packet as supplied.
+
+## Wire decoder
+
+DNS Dash understands these records natively:
 
 - A
 - AAAA
-- HTTPS
-- SVCB
+- NS
 - CNAME
+- SOA
+- PTR
 - MX
 - TXT
-- NS
-- SOA
+- SRV
 - CAA
+- SVCB
+- HTTPS
+- OPT
 
-For HTTPS/SVCB records it extracts useful service-binding parameters, including:
+Unknown RDATA is retained as Base64/hex instead of being silently discarded.
 
-- ALPN
-- IPv4 hints
-- IPv6 hints
-- port
-- ECHConfig
-- approximate ECHConfig byte size
+The parser supports compressed DNS owner names and rejects invalid compression loops and truncated packets.
 
-The default dashboard query is:
+## HTTPS / SVCB inspection
+
+DNS Dash implements the RFC 9460 SVCB/HTTPS wire layout. It decodes:
+
+- `mandatory`
+- `alpn`
+- `no-default-alpn`
+- `port`
+- `ipv4hint`
+- `ech`
+- `ipv6hint`
+- unknown SvcParam keys as raw Base64/hex
+
+SvcParam keys are checked for strict numeric ordering as required by the wire format.
+
+The dashboard's connection-profile mode resolves A, AAAA and HTTPS in parallel, then summarizes IP addresses, ALPN values and ECH availability.
+
+## ECH inspector
+
+When an HTTPS/SVCB record contains SvcParamKey 5 (`ech`), DNS Dash decodes the binary ECHConfigList according to RFC 9849.
+
+For ECH version `0xfe0d` it displays:
+
+- ECH version
+- configuration ID
+- HPKE KEM ID/name
+- public-key size
+- HPKE KDF + AEAD suites
+- maximum name length
+- ECH public name
+- ECH extensions
+- exact Base64 ECHConfigList
+
+The Worker never generates or stores an ECH private key. It only displays public ECH configuration obtained from DNS.
+
+The default dashboard target is:
 
 ```text
-cloudflare-ech.com / HTTPS
+cloudflare-ech.com
 ```
 
-This makes it easy to see whether the resolver currently returns an `ech=` HTTPS-record parameter.
+## v2rayNG / Xray
 
-## v2rayNG / Xray ECH use
-
-After deployment, your Worker DoH URL is:
+After deployment your DoH endpoint is:
 
 ```text
 https://YOUR-WORKER/dns-query
 ```
 
-For Xray configurations that accept a DoH URL in ECH configuration lookup, the useful form is:
+The dashboard also shows the ECH lookup helper form:
 
 ```text
 cloudflare-ech.com+https://YOUR-WORKER/dns-query
 ```
 
-The dashboard shows both values and provides copy buttons.
+The important service for clients is `/dns-query`; DNS Dash does not need a separate `/ech` endpoint because a compatible client can request HTTPS type 65 through DoH and obtain the current ECHConfigList from DNS.
 
-The `/dns-query` endpoint is the part intended for clients. The dashboard does not invent or hardcode an ECH key; it lets DNS HTTPS type 65 carry the current ECHConfig normally.
+## Privacy and security choices
 
-## Configuration
+- no application-level DNS query logging or analytics;
+- no third-party JavaScript, fonts, or assets in the dashboard;
+- no arbitrary HTTP proxy behavior;
+- no ECH private-key storage;
+- strict packet-size bounds;
+- query/response DNS transaction validation;
+- HTTPS-only configurable upstreams;
+- bounded resolver fallback list;
+- security headers and restrictive Content Security Policy on the dashboard;
+- CORS on the DoH/API surfaces for clients and browser tools.
 
-`wrangler.toml` includes:
-
-```toml
-[vars]
-UPSTREAM_DOH = "https://cloudflare-dns.com/dns-query"
-DNS_TIMEOUT_MS = "6000"
-```
-
-### `UPSTREAM_DOH`
-
-Must be an HTTPS DoH endpoint. DNS Dash sends standard wire-format DoH to it. The dashboard JSON API expects a Cloudflare/Google-style `application/dns-json` response from the same endpoint.
-
-For the most predictable dashboard behavior, leave the default Cloudflare resolver unless the alternate resolver explicitly supports that JSON schema.
-
-### `DNS_TIMEOUT_MS`
-
-Resolver request timeout. Values are clamped between 1000 and 15000 ms.
+DNS Dash does not claim to hide queries from the configured upstream recursive resolver. The Worker is a DoH relay and inspector, not an oblivious-DoH implementation.
 
 ## Deploy
 
@@ -125,20 +188,23 @@ npm install
 npx wrangler deploy
 ```
 
-Or connect the repository to Cloudflare Workers Builds and use the repository's `wrangler.toml`.
+Or connect the repository to Cloudflare Workers Builds and use `wrangler.toml`.
 
-## Verify locally
+## Verify
 
 ```bash
 npm install
 npm run check
 ```
 
-`npm run check` performs:
+The CI pipeline performs:
 
-1. unit tests;
-2. standalone Worker bundling;
-3. Wrangler deployment dry-run.
+1. JavaScript syntax checks;
+2. packet-level unit tests;
+3. standalone Worker bundling;
+4. Wrangler deployment dry-run;
+5. local `workerd` smoke testing;
+6. artifact upload.
 
 The generated standalone Worker is:
 
@@ -146,14 +212,8 @@ The generated standalone Worker is:
 dist/_worker.js
 ```
 
-## Design choices
+## Protocol references
 
-- Module Worker syntax only.
-- No third-party runtime packages.
-- No DNS query logging or analytics in application code.
-- No custom ECH key storage.
-- No arbitrary HTTP proxy behavior.
-- Wire-format DoH is kept separate from the dashboard's JSON inspection API.
-- DNS queries are bounded to the DNS protocol maximum size and malformed requests are rejected before an upstream fetch.
-- CORS is enabled for the DoH/API surfaces so browser and cross-origin DNS tools can use them.
-- The dashboard ships as self-contained HTML/CSS/JavaScript with no external assets.
+- RFC 8484 — DNS Queries over HTTPS
+- RFC 9460 — SVCB and HTTPS DNS resource records
+- RFC 9849 — TLS Encrypted Client Hello
