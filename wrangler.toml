@@ -1,6 +1,7 @@
 name = "dnsdash"
 main = "src/index.js"
 compatibility_date = "2026-08-01"
+workers_dev = true
 
 [vars]
 UPSTREAM_DOH = "https://cloudflare-dns.com/dns-query"
