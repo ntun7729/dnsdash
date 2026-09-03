@@ -5,4 +5,5 @@ workers_dev = true
 
 [vars]
 UPSTREAM_DOH = "https://cloudflare-dns.com/dns-query"
+UPSTREAM_DOH_FALLBACKS = ""
 DNS_TIMEOUT_MS = "6000"
