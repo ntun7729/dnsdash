@@ -8,6 +8,9 @@ export function dashboardApp() {
     profile: $('profile'), answers: $('answers'), answerCards: $('answerCards'), echArea: $('echArea'), rawArea: $('rawArea'), doh: $('doh'), echHelper: $('echHelper')
   };
 
+  document.documentElement.dataset.dnsdashJs = 'active';
+  e.healthText.textContent = 'UI active · checking resolver';
+
   const endpoint = location.origin + '/dns-query';
   e.doh.textContent = endpoint;
   e.echHelper.textContent = 'cloudflare-ech.com+' + endpoint;
@@ -18,15 +21,25 @@ export function dashboardApp() {
   const busy = (on) => { state.busy = on; e.go.disabled = on; e.go.textContent = on ? 'Inspecting…' : 'Inspect'; };
 
   async function copyText(text, button) {
-    try {
-      if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
-      else {
+    let copied = false;
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); copied = true; } catch {}
+    }
+    if (!copied) {
+      try {
         const area = document.createElement('textarea');
-        area.value = text; area.readOnly = true; area.style.position = 'fixed'; area.style.opacity = '0';
-        document.body.appendChild(area); area.select(); document.execCommand('copy'); area.remove();
-      }
-      if (button) { const old = button.textContent; button.textContent = 'Copied'; setTimeout(() => { button.textContent = old; }, 900); }
-    } catch { if (button) button.textContent = 'Copy failed'; }
+        area.value = text; area.readOnly = true; area.style.position = 'fixed'; area.style.left = '-9999px'; area.style.top = '0';
+        document.body.appendChild(area); area.focus(); area.select();
+        copied = document.execCommand('copy');
+        area.remove();
+      } catch {}
+    }
+    if (button) {
+      const old = button.dataset.originalLabel || button.textContent;
+      button.dataset.originalLabel = old;
+      button.textContent = copied ? 'Copied' : 'Copy failed';
+      setTimeout(() => { button.textContent = old; }, 1000);
+    }
   }
 
   function setMode(mode) {
@@ -47,7 +60,7 @@ export function dashboardApp() {
       const upstreams = Array.isArray(d.upstreams) ? d.upstreams : [];
       e.resolverList.innerHTML = upstreams.length ? upstreams.map((x, i) => pill((i ? 'fallback · ' : 'primary · ') + x, i ? '' : 'good')).join('') : pill('No resolver', 'warn');
     } catch {
-      e.healthDot.classList.remove('ok'); e.healthText.textContent = 'Health unavailable'; e.resolverList.innerHTML = pill('Health check failed', 'warn');
+      e.healthDot.classList.remove('ok'); e.healthText.textContent = 'UI active · resolver unavailable'; e.resolverList.innerHTML = pill('Health check failed', 'warn');
     }
   }
 
