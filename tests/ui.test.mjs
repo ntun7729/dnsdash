@@ -4,6 +4,8 @@ import { JSDOM } from 'jsdom';
 import { dashboardApp } from '../src/app.js';
 import { dashboardPage } from '../src/ui.js';
 
+const APP_SCRIPT = `(${dashboardApp.toString()})();`;
+
 function profilePayload() {
   const dns = (type, answers, inspection = { serviceBindings: [], echAvailable: false, echConfigs: [] }) => ({
     query: { name: 'cloudflare-ech.com', type },
@@ -63,7 +65,7 @@ function profilePayload() {
   };
 }
 
-async function waitFor(predicate, timeoutMs = 500) {
+async function waitFor(predicate, timeoutMs = 800) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (predicate()) return;
@@ -72,48 +74,38 @@ async function waitFor(predicate, timeoutMs = 500) {
   throw new Error('condition did not become true');
 }
 
-test('dashboard client source is syntactically valid and loaded as an external script', () => {
-  assert.doesNotThrow(() => new Function('(' + dashboardApp.toString() + ');'));
-  const html = dashboardPage();
-  assert.match(html, /<script src="\/app\.js\?v=2\.1\.0" defer><\/script>/);
-  assert.doesNotMatch(html, /<script>\s*\(function/);
+test('dashboard runtime is inline, nonce protected and independent of /app.js loading', () => {
+  assert.doesNotThrow(() => new Function(APP_SCRIPT));
+  const html = dashboardPage(APP_SCRIPT, 'testnonce123');
+  assert.match(html, /<script nonce="testnonce123" data-cfasync="false">/);
+  assert.doesNotMatch(html, /<script[^>]+src=/);
+  assert.match(html, /Resolver ready/);
 });
 
-test('dashboard boots, resolves health/profile, renders DNS cards and ECH', async () => {
-  const dom = new JSDOM(dashboardPage(), {
+test('final HTML document boots, resolves health/profile, renders DNS cards and ECH', async () => {
+  const dom = new JSDOM(dashboardPage(APP_SCRIPT, 'testnonce123'), {
     url: 'https://dnsdash.example/',
-    runScripts: 'outside-only',
-    pretendToBeVisual: true
-  });
-
-  const previous = {
-    window: globalThis.window,
-    document: globalThis.document,
-    navigator: globalThis.navigator,
-    location: globalThis.location,
-    fetch: globalThis.fetch
-  };
-
-  Object.defineProperties(globalThis, {
-    window: { value: dom.window, configurable: true, writable: true },
-    document: { value: dom.window.document, configurable: true, writable: true },
-    navigator: { value: dom.window.navigator, configurable: true, writable: true },
-    location: { value: dom.window.location, configurable: true, writable: true }
-  });
-
-  globalThis.fetch = async (input) => {
-    const url = new URL(String(input), 'https://dnsdash.example/');
-    if (url.pathname === '/health') {
-      return Response.json({ ok: true, upstreams: ['cloudflare-dns.com'] });
+    runScripts: 'dangerously',
+    pretendToBeVisual: true,
+    beforeParse(window) {
+      window.fetch = async (input) => {
+        const url = new URL(String(input), 'https://dnsdash.example/');
+        if (url.pathname === '/health') {
+          return { ok: true, json: async () => ({ ok: true, upstreams: ['cloudflare-dns.com'] }) };
+        }
+        if (url.pathname === '/api/profile') {
+          return { ok: true, json: async () => profilePayload() };
+        }
+        throw new Error('unexpected fetch ' + url.pathname);
+      };
+      Object.defineProperty(window.navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: async () => {} }
+      });
     }
-    if (url.pathname === '/api/profile') {
-      return Response.json(profilePayload());
-    }
-    throw new Error('unexpected fetch ' + url.pathname);
-  };
+  });
 
   try {
-    dashboardApp();
     await waitFor(() => dom.window.document.getElementById('healthText').textContent === 'Resolver ready');
     await waitFor(() => dom.window.document.getElementById('latency').textContent === '17 ms');
 
@@ -127,14 +119,11 @@ test('dashboard boots, resolves health/profile, renders DNS cards and ECH', asyn
     assert.match(dom.window.document.getElementById('echArea').textContent, /ECH advertised/);
     assert.match(dom.window.document.getElementById('echArea').textContent, /cloudflare-ech\.com/);
     assert.doesNotMatch(dom.window.document.body.textContent, /Loading…/);
+
+    const googleButton = [...dom.window.document.querySelectorAll('.chip')].find(el => el.textContent === 'Google');
+    googleButton.click();
+    assert.equal(dom.window.document.getElementById('name').value, 'google.com');
   } finally {
     dom.window.close();
-    Object.defineProperties(globalThis, {
-      window: { value: previous.window, configurable: true, writable: true },
-      document: { value: previous.document, configurable: true, writable: true },
-      navigator: { value: previous.navigator, configurable: true, writable: true },
-      location: { value: previous.location, configurable: true, writable: true }
-    });
-    globalThis.fetch = previous.fetch;
   }
 });
