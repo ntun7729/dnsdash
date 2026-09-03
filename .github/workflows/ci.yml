@@ -75,7 +75,7 @@ jobs:
           fi
 
           grep -Fq 'DNS Dash' /tmp/dnsdash-home.html
-          grep -Fq '/dns-query' /tmp/dnsdash-home.html
+          grep -Fq 'DoH endpoint' /tmp/dnsdash-home.html
           grep -Fq '/app.js?v=2.1.0' /tmp/dnsdash-home.html
 
           curl -kfsS 'https://127.0.0.1:8787/app.js?v=2.1.0' > /tmp/dnsdash-app.js
