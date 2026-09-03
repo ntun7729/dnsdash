@@ -37,7 +37,7 @@ jobs:
             node --check "$file"
           done
 
-      - name: Unit and DOM tests
+      - name: Unit and dashboard tests
         run: npm test
 
       - name: Bundle Worker
@@ -46,7 +46,7 @@ jobs:
       - name: Cloudflare dry run
         run: npm run cf:dry-run
 
-      - name: Local dashboard runtime smoke test
+      - name: Local no-JavaScript dashboard smoke test
         shell: bash
         run: |
           set -euxo pipefail
@@ -75,21 +75,17 @@ jobs:
           fi
 
           grep -Fq 'DNS Dash' /tmp/dnsdash-home.html
-          grep -Fq 'DoH endpoint' /tmp/dnsdash-home.html
-          grep -Fq 'data-cfasync="false"' /tmp/dnsdash-home.html
-          if grep -Fq '<script src=' /tmp/dnsdash-home.html; then
-            echo 'dashboard unexpectedly depends on external script loading'
-            exit 1
-          fi
+          grep -Fq 'Dashboard ready' /tmp/dnsdash-home.html
+          grep -Fq 'Core controls work without JavaScript' /tmp/dnsdash-home.html
+          grep -Fq 'method="get" action="/"' /tmp/dnsdash-home.html
+          grep -Fq 'name="run" value="1"' /tmp/dnsdash-home.html
+          grep -Fq 'name=google.com' /tmp/dnsdash-home.html
+          grep -Fq '>Google</a>' /tmp/dnsdash-home.html
+          grep -Fq 'href="/doh.txt"' /tmp/dnsdash-home.html
+          grep -Fq 'href="/ech-helper.txt"' /tmp/dnsdash-home.html
 
-          node --input-type=module <<'NODE'
-          import { readFileSync, writeFileSync } from 'node:fs';
-          const html = readFileSync('/tmp/dnsdash-home.html', 'utf8');
-          const match = html.match(/<script nonce="[^"]+" data-cfasync="false">([\s\S]*?)<\/script>/);
-          if (!match) throw new Error('inline dashboard runtime not found');
-          writeFileSync('/tmp/dnsdash-inline.js', match[1]);
-          NODE
-          node --check /tmp/dnsdash-inline.js
+          test "$(curl -kfsS https://127.0.0.1:8787/doh.txt)" = 'https://127.0.0.1:8787/dns-query'
+          test "$(curl -kfsS https://127.0.0.1:8787/ech-helper.txt)" = 'cloudflare-ech.com+https://127.0.0.1:8787/dns-query'
 
           curl -kfsS https://127.0.0.1:8787/health > /tmp/dnsdash-health.json
           grep -Fq '"ok":true' /tmp/dnsdash-health.json
@@ -99,7 +95,6 @@ jobs:
 
           code=$(curl -ksS -o /tmp/dnsdash-missing.txt -w '%{http_code}' https://127.0.0.1:8787/dns-query)
           test "$code" = "400"
-
           code=$(curl -ksS -o /tmp/dnsdash-404.txt -w '%{http_code}' https://127.0.0.1:8787/not-found)
           test "$code" = "404"
 
@@ -107,7 +102,7 @@ jobs:
           WRANGLER_PID=''
           trap - EXIT
 
-      - name: Live upstream DNS smoke test
+      - name: Live upstream DNS and SSR result smoke test
         shell: bash
         run: |
           set -euxo pipefail
@@ -171,6 +166,11 @@ jobs:
           assert.equal(parsed.question[0].typeName, 'A');
           assert.ok(parsed.answer.some(rr => rr.typeName === 'A'));
           NODE
+
+          curl -kfsS 'https://127.0.0.1:8788/?run=1&mode=record&name=example.com&type=A' > /tmp/dnsdash-ssr.html
+          grep -Fq 'Server rendered' /tmp/dnsdash-ssr.html
+          grep -Fq 'NOERROR' /tmp/dnsdash-ssr.html
+          grep -Fq 'example.com' /tmp/dnsdash-ssr.html
 
           curl -kfsS 'https://127.0.0.1:8788/api/resolve?name=cloudflare-ech.com&type=HTTPS&dnssec=1' > /tmp/dnsdash-ech.json
           grep -Fq '"statusName": "NOERROR"' /tmp/dnsdash-ech.json
