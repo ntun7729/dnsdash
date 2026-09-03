@@ -1,0 +1,101 @@
+name: Verify DNS Dash
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dnsdash-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package.json
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Syntax check
+        run: |
+          for file in src/*.js tests/*.mjs; do
+            node --check "$file"
+          done
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Bundle Worker
+        run: npm run build
+
+      - name: Cloudflare dry run
+        run: npm run cf:dry-run
+
+      - name: Local Worker smoke test
+        shell: bash
+        run: |
+          cleanup() {
+            if [ -n "${WRANGLER_PID:-}" ]; then
+              kill "$WRANGLER_PID" 2>/dev/null || true
+              wait "$WRANGLER_PID" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          npx wrangler dev --ip 127.0.0.1 --port 8787 --local-protocol https > /tmp/dnsdash-wrangler.log 2>&1 &
+          WRANGLER_PID=$!
+
+          ready=0
+          for _ in $(seq 1 80); do
+            if curl -kfsS https://127.0.0.1:8787/ > /tmp/dnsdash-home.html 2>/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.25
+          done
+          if [ "$ready" != "1" ]; then
+            cat /tmp/dnsdash-wrangler.log
+            exit 1
+          fi
+
+          grep -q 'DNS Dash' /tmp/dnsdash-home.html
+          grep -q '/dns-query' /tmp/dnsdash-home.html
+
+          code=$(curl -ksS -o /tmp/dnsdash-missing.txt -w '%{http_code}' https://127.0.0.1:8787/dns-query)
+          test "$code" = "400"
+
+          code=$(curl -ksS -o /tmp/dnsdash-404.txt -w '%{http_code}' https://127.0.0.1:8787/not-found)
+          test "$code" = "404"
+
+          cleanup
+          WRANGLER_PID=''
+          trap - EXIT
+
+      - name: Verify bundle
+        run: |
+          test -s dist/_worker.js
+          wc -c dist/_worker.js
+          find dist/wrangler -maxdepth 2 -type f -print
+
+      - name: Upload Worker bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsdash-worker-${{ github.sha }}
+          path: dist/_worker.js
+          if-no-files-found: error
+          retention-days: 14
