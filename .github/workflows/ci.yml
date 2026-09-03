@@ -46,9 +46,10 @@ jobs:
       - name: Cloudflare dry run
         run: npm run cf:dry-run
 
-      - name: Local Worker, dashboard and live DNS smoke test
+      - name: Local dashboard runtime smoke test
         shell: bash
         run: |
+          set -euxo pipefail
           cleanup() {
             if [ -n "${WRANGLER_PID:-}" ]; then
               kill "$WRANGLER_PID" 2>/dev/null || true
@@ -73,23 +74,54 @@ jobs:
             exit 1
           fi
 
-          grep -q 'DNS Dash' /tmp/dnsdash-home.html
-          grep -q '/dns-query' /tmp/dnsdash-home.html
-          grep -q '/app.js?v=2.1.0' /tmp/dnsdash-home.html
+          grep -Fq 'DNS Dash' /tmp/dnsdash-home.html
+          grep -Fq '/dns-query' /tmp/dnsdash-home.html
+          grep -Fq '/app.js?v=2.1.0' /tmp/dnsdash-home.html
 
-          curl -kfsS https://127.0.0.1:8787/app.js?v=2.1.0 > /tmp/dnsdash-app.js
+          curl -kfsS 'https://127.0.0.1:8787/app.js?v=2.1.0' > /tmp/dnsdash-app.js
           test -s /tmp/dnsdash-app.js
           node --check /tmp/dnsdash-app.js
 
           curl -kfsS https://127.0.0.1:8787/health > /tmp/dnsdash-health.json
-          grep -q '"ok":true' /tmp/dnsdash-health.json
-          grep -q '"wire-doh"' /tmp/dnsdash-health.json
+          grep -Fq '"ok":true' /tmp/dnsdash-health.json
+          grep -Fq '"wire-doh"' /tmp/dnsdash-health.json
+          grep -Fq 'cloudflare-dns.com' /tmp/dnsdash-health.json
+          grep -Fq 'dns.google' /tmp/dnsdash-health.json
 
           code=$(curl -ksS -o /tmp/dnsdash-missing.txt -w '%{http_code}' https://127.0.0.1:8787/dns-query)
           test "$code" = "400"
 
           code=$(curl -ksS -o /tmp/dnsdash-404.txt -w '%{http_code}' https://127.0.0.1:8787/not-found)
           test "$code" = "404"
+
+          cleanup
+          WRANGLER_PID=''
+          trap - EXIT
+
+      - name: Live upstream DNS smoke test
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cleanup() {
+            if [ -n "${WRANGLER_PID:-}" ]; then
+              kill "$WRANGLER_PID" 2>/dev/null || true
+              wait "$WRANGLER_PID" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          npx wrangler dev --ip 127.0.0.1 --port 8788 --local-protocol https > /tmp/dnsdash-live-wrangler.log 2>&1 &
+          WRANGLER_PID=$!
+
+          ready=0
+          for _ in $(seq 1 80); do
+            if curl -kfsS https://127.0.0.1:8788/health >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 0.25
+          done
+          test "$ready" = "1"
 
           node --input-type=module <<'NODE'
           import { writeFileSync } from 'node:fs';
@@ -98,21 +130,22 @@ jobs:
           NODE
 
           live=0
-          for _ in 1 2 3; do
+          for attempt in 1 2 3 4 5; do
             code=$(curl -ksS -o /tmp/dns-response.bin -w '%{http_code}' \
               -X POST \
               -H 'Content-Type: application/dns-message' \
               -H 'Accept: application/dns-message' \
               --data-binary @/tmp/dns-query.bin \
-              https://127.0.0.1:8787/dns-query)
+              https://127.0.0.1:8788/dns-query || true)
             if [ "$code" = "200" ]; then
               live=1
               break
             fi
+            echo "live DoH attempt $attempt returned HTTP $code"
             sleep 1
           done
           if [ "$live" != "1" ]; then
-            cat /tmp/dnsdash-wrangler.log
+            cat /tmp/dnsdash-live-wrangler.log
             exit 1
           fi
 
@@ -130,13 +163,13 @@ jobs:
           assert.ok(parsed.answer.some(rr => rr.typeName === 'A'));
           NODE
 
-          curl -kfsS 'https://127.0.0.1:8787/api/resolve?name=cloudflare-ech.com&type=HTTPS&dnssec=1' > /tmp/dnsdash-ech.json
-          grep -q '"statusName": "NOERROR"' /tmp/dnsdash-ech.json
-          grep -q '"type": "HTTPS"' /tmp/dnsdash-ech.json
+          curl -kfsS 'https://127.0.0.1:8788/api/resolve?name=cloudflare-ech.com&type=HTTPS&dnssec=1' > /tmp/dnsdash-ech.json
+          grep -Fq '"statusName": "NOERROR"' /tmp/dnsdash-ech.json
+          grep -Fq '"type": "HTTPS"' /tmp/dnsdash-ech.json
 
-          curl -kfsS 'https://127.0.0.1:8787/api/profile?name=cloudflare-ech.com&dnssec=1' > /tmp/dnsdash-profile.json
-          grep -q '"records"' /tmp/dnsdash-profile.json
-          grep -q '"HTTPS"' /tmp/dnsdash-profile.json
+          curl -kfsS 'https://127.0.0.1:8788/api/profile?name=cloudflare-ech.com&dnssec=1' > /tmp/dnsdash-profile.json
+          grep -Fq '"records"' /tmp/dnsdash-profile.json
+          grep -Fq '"HTTPS"' /tmp/dnsdash-profile.json
 
           cleanup
           WRANGLER_PID=''
