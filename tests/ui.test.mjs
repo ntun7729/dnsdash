@@ -30,11 +30,14 @@ test('inspector core navigation and inspection work without JavaScript', () => {
     origin: 'https://dnsdash.example', mode: 'profile', name: 'cloudflare-ech.com', type: 'HTTPS',
     health: { upstreams: ['cloudflare-dns.com','dns.google','dns.quad9.net'] }
   });
-  assert.match(html, /<form class="query" method="get" action="\/">/);
+  assert.match(html, /<form class="query" method="get" action="\/inspect">/);
   assert.match(html, /name="run" value="1"/);
+  assert.match(html, /href="\/inspect\?run=1&amp;mode=profile&amp;name=google\.com/);
   assert.match(html, />Google<\/a>/);
-  assert.match(html, /Dashboard ready/);
+  assert.match(html, /Inspector ready/);
+  assert.match(html, /href="\/">Dashboard<\/a>/);
   assert.match(html, /https:\/\/dnsdash\.example\/dns-query/);
+  assert.match(html, /Query history is written only when optional D1 logging is configured/);
 });
 
 test('inspector renders DNS records and ECH completely on the server', () => {
