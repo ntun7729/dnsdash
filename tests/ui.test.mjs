@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.js';
+import { recordRuntime } from '../src/analytics.js';
 import { dashboardPage } from '../src/ui.js';
 import { adminPage, dashboardHomePage, queryLogPage } from '../src/pages.js';
 
@@ -72,13 +73,16 @@ test('Pi-hole home dashboard exposes firewall metrics and setup state', () => {
 test('admin page exposes Pi-hole controls after authentication', () => {
   const html = adminPage({
     configured: true, authenticated: true, kvConfigured: true, d1Configured: true,
-    firewall: { enabled: true, blockMode: 'nxdomain', gravity: { domains: 55 } },
+    firewall: { enabled: true, configuredEnabled: true, paused: false, blockMode: 'nxdomain', gravity: { domains: 55 } },
     config: { allow: ['good.example'], deny: ['ads.example'], sources: [{ id:'s1', name:'List', url:'https://list.example/hosts', enabled:true }] }
   });
   assert.match(html, /Blocklist subscriptions/);
   assert.match(html, /Allowlist/);
   assert.match(html, /Denylist/);
   assert.match(html, /Refresh & compile lists/);
+  assert.match(html, /Pause 30 sec/);
+  assert.match(html, /Pause 5 min/);
+  assert.match(html, /Pause 1 hour/);
   assert.match(html, /ads\.example/);
   assert.match(html, /clear-log/);
 });
@@ -87,6 +91,26 @@ test('query page hides history without admin login', () => {
   const html = queryLogPage({ configured: true, authenticated: false, log: { configured: true, rows: [] } });
   assert.match(html, /Admin login is required/);
   assert.doesNotMatch(html, /Recent DNS queries/);
+});
+
+test('public stats redact domain names while admin bearer auth can see them', async () => {
+  recordRuntime({ domain: 'private-history.example', qtype: 'A', action: 'blocked' });
+  const env = { DNSDASH_ADMIN_TOKEN: 'test-secret' };
+
+  const publicResponse = await worker.fetch(new Request('https://dnsdash.example/api/stats'), env, { waitUntil(){} });
+  assert.equal(publicResponse.status, 200);
+  const publicStats = await publicResponse.json();
+  assert.deepEqual(publicStats.runtime.topDomains, []);
+  assert.deepEqual(publicStats.runtime.topBlocked, []);
+  assert.doesNotMatch(JSON.stringify(publicStats), /private-history\.example/);
+
+  const adminResponse = await worker.fetch(new Request('https://dnsdash.example/api/stats', {
+    headers: { Authorization: 'Bearer test-secret' }
+  }), env, { waitUntil(){} });
+  assert.equal(adminResponse.status, 200);
+  const adminStats = await adminResponse.json();
+  assert.match(JSON.stringify(adminStats.runtime.topDomains), /private-history\.example/);
+  assert.match(JSON.stringify(adminStats.runtime.topBlocked), /private-history\.example/);
 });
 
 test('Worker root serves firewall dashboard and endpoint helpers', async () => {
