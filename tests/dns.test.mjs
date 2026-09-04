@@ -149,6 +149,7 @@ test('DoH GET accepts wire query but relays upstream as POST', async () => {
   assert.equal(seen.url, 'https://cloudflare-dns.com/dns-query');
   assert.deepEqual([...seen.body], [...query]);
   assert.equal(res.headers.get('X-DNS-Upstream'), 'cloudflare-dns.com');
+  assert.equal(res.headers.get('X-DNS-Blocked'), '0');
 });
 
 test('DoH POST validates media type and DNS packet structure', async () => {
@@ -209,9 +210,12 @@ test('query validator rejects messages with QR set', () => {
   assert.throws(() => validateDnsQuery(query), /response bit/);
 });
 
-test('health payload exposes capabilities without leaking full upstream URLs', () => {
-  const health = healthPayload({ UPSTREAM_DOH: 'https://resolver.example/private/path?x=1' });
+test('health payload exposes firewall capabilities without leaking full upstream URLs', async () => {
+  const health = await healthPayload({ UPSTREAM_DOH: 'https://resolver.example/private/path?x=1' });
   assert.equal(health.ok, true);
+  assert.equal(health.version, '3.0.0');
   assert.deepEqual(health.upstreams, ['resolver.example']);
   assert.ok(health.features.includes('ech-rfc9849'));
+  assert.ok(health.features.includes('dns-firewall'));
+  assert.equal(health.firewall.enabled, true);
 });
