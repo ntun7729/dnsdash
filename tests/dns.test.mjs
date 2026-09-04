@@ -210,12 +210,30 @@ test('query validator rejects messages with QR set', () => {
   assert.throws(() => validateDnsQuery(query), /response bit/);
 });
 
-test('health payload exposes firewall capabilities without leaking full upstream URLs', async () => {
-  const health = await healthPayload({ UPSTREAM_DOH: 'https://resolver.example/private/path?x=1' });
+test('health payload exposes capabilities but redacts resolver paths and blocklist source URLs', async () => {
+  const kv = {
+    async get(key, type) {
+      if (key === 'firewall:config:v1') {
+        const config = { enabled: true, blockMode: 'nxdomain', allow: [], deny: [], sources: [{ id: 's1', name: 'Private list', url: 'https://secret-list.example/private.txt', enabled: true }] };
+        return type === 'json' ? config : JSON.stringify(config);
+      }
+      if (key === 'firewall:gravity:meta:v1') {
+        const meta = { domains: 321, lastUpdated: 12345, capped: false, sources: [{ url: 'https://secret-list.example/private.txt' }], errors: [{ url: 'https://secret-list.example/fail.txt', error: 'private' }] };
+        return type === 'json' ? meta : JSON.stringify(meta);
+      }
+      return null;
+    },
+    async put() {}
+  };
+  const health = await healthPayload({ UPSTREAM_DOH: 'https://resolver.example/private/path?x=1', DNSDASH_KV: kv });
   assert.equal(health.ok, true);
   assert.equal(health.version, '3.0.0');
   assert.deepEqual(health.upstreams, ['resolver.example']);
   assert.ok(health.features.includes('ech-rfc9849'));
   assert.ok(health.features.includes('dns-firewall'));
   assert.equal(health.firewall.enabled, true);
+  assert.equal(health.firewall.gravity.domains, 321);
+  assert.equal(health.firewall.gravity.errorCount, 1);
+  assert.equal('sources' in health.firewall.gravity, false);
+  assert.doesNotMatch(JSON.stringify(health), /secret-list\.example|private\.txt|fail\.txt/);
 });
