@@ -170,7 +170,7 @@ export async function handleProfileApi(request, env = {}, fetcher = fetch) {
 
 export async function healthPayload(env = {}) {
   const upstreams = getUpstreams(env);
-  const firewall = await getFirewallStatus(env);
+  const firewall = publicFirewallStatus(await getFirewallStatus(env));
   return {
     ok: true,
     service: 'dnsdash',
@@ -357,6 +357,27 @@ async function fetchWithTimeout(fetcher, input, init, timeoutMs) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try { return await fetcher(input, { ...init, signal: controller.signal }); }
   finally { clearTimeout(timer); }
+}
+
+function publicFirewallStatus(status = {}) {
+  return {
+    enabled: Boolean(status.enabled),
+    configuredEnabled: Boolean(status.configuredEnabled),
+    paused: Boolean(status.paused),
+    disabledUntil: Number(status.disabledUntil || 0),
+    blockMode: status.blockMode || 'nxdomain',
+    allowCount: Number(status.allowCount || 0),
+    denyCount: Number(status.denyCount || 0),
+    sourceCount: Number(status.sourceCount || 0),
+    enabledSources: Number(status.enabledSources || 0),
+    kvConfigured: Boolean(status.kvConfigured),
+    gravity: {
+      domains: Number(status.gravity?.domains || 0),
+      lastUpdated: Number(status.gravity?.lastUpdated || 0),
+      capped: Boolean(status.gravity?.capped),
+      errorCount: Array.isArray(status.gravity?.errors) ? status.gravity.errors.length : 0
+    }
+  };
 }
 
 function mediaType(value) { return String(value || '').split(';', 1)[0].trim().toLowerCase(); }
