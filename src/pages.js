@@ -11,7 +11,7 @@ export function dashboardHomePage(model = {}) {
   const byType = persistent ? (stats.byType || []) : (model.stats?.runtime?.byType || []);
   return shell('Dashboard', `
     <div class="statusline">
-      ${fw.enabled?pill('Blocking enabled','good'):pill('Blocking disabled','warn')}
+      ${fw.paused?pill('Blocking temporarily paused','warn'):fw.enabled?pill('Blocking enabled','good'):pill('Blocking disabled','warn')}
       ${model.kvConfigured?pill('KV connected','good'):pill('KV not connected','warn')}
       ${model.d1Configured?pill('D1 logging connected','good'):pill('D1 not connected','warn')}
       ${persistent?pill('24h persistent stats','good'):pill('Cold-start runtime stats','warn')}
@@ -28,7 +28,7 @@ export function dashboardHomePage(model = {}) {
     <div class="grid dashboardGrid section">
       <section class="card pad"><h2>Firewall</h2><div class="sub">Local filtering happens before upstream DoH.</div>
         <div class="list">
-          ${kv('Status',fw.enabled?'Enabled':'Disabled')}${kv('Block mode',fw.blockMode||'nxdomain')}${kv('Allow rules',fw.allowCount||0)}${kv('Deny rules',fw.denyCount||0)}${kv('Enabled lists',`${fw.enabledSources||0}/${fw.sourceCount||0}`)}${kv('Compiled domains',fw.gravity?.domains||0)}
+          ${kv('Status',fw.paused?`Paused until ${date(fw.disabledUntil)}`:fw.enabled?'Enabled':'Disabled')}${kv('Block mode',fw.blockMode||'nxdomain')}${kv('Allow rules',fw.allowCount||0)}${kv('Deny rules',fw.denyCount||0)}${kv('Enabled lists',`${fw.enabledSources||0}/${fw.sourceCount||0}`)}${kv('Compiled domains',fw.gravity?.domains||0)}
         </div>
         <div class="actions"><a class="linkbtn primary" href="/admin">Manage firewall</a><a class="linkbtn" href="/inspect">DNS inspector</a></div>
       </section>
@@ -53,10 +53,14 @@ export function adminPage(model = {}) {
     body += `<div class="actions"><form method="post" action="/admin/logout"><button class="btn" type="submit">Logout</button></form></div>`;
     if (!model.kvConfigured) body += `<div class="notice"><strong>KV required for persistent filtering controls.</strong><br>Create/bind a Workers KV namespace with binding name <code>DNSDASH_KV</code>. Environment rules still work through <code>DNSDASH_ALLOW</code> and <code>DNSDASH_DENY</code>.</div>`;
     if (!model.d1Configured) body += `<div class="notice"><strong>D1 not connected.</strong><br>Bind a D1 database as <code>DNSDASH_DB</code> to enable persistent query logs and dashboard history.</div>`;
+    const configuredEnabled = fw.configuredEnabled == null ? fw.enabled : fw.configuredEnabled;
     body += `<div class="grid adminGrid section">
-      <section class="card pad"><h2>Blocking</h2><div class="sub">Firewall state and reply mode.</div>
-        <div class="statusline section">${fw.enabled?pill('Enabled','good'):pill('Disabled','warn')}${pill(`${fw.gravity?.domains||0} gravity domains`)}</div>
-        <form class="form" method="post" action="/admin/action"><input type="hidden" name="action" value="set-enabled"><input type="hidden" name="enabled" value="${fw.enabled?'0':'1'}"><button class="btn ${fw.enabled?'danger':'good'}" type="submit" ${model.kvConfigured?'':'disabled'}>${fw.enabled?'Disable blocking':'Enable blocking'}</button></form>
+      <section class="card pad"><h2>Blocking</h2><div class="sub">Firewall state, temporary pause and reply mode.</div>
+        <div class="statusline section">${fw.paused?pill(`Paused until ${date(fw.disabledUntil)}`,'warn'):fw.enabled?pill('Enabled','good'):pill('Disabled','warn')}${pill(`${fw.gravity?.domains||0} gravity domains`)}</div>
+        <form class="form" method="post" action="/admin/action"><input type="hidden" name="action" value="set-enabled"><input type="hidden" name="enabled" value="${configuredEnabled?'0':'1'}"><button class="btn ${configuredEnabled?'danger':'good'}" type="submit" ${model.kvConfigured?'':'disabled'}>${configuredEnabled?'Disable blocking':'Enable blocking'}</button></form>
+        ${configuredEnabled ? (fw.paused
+          ? `<form class="form" method="post" action="/admin/action"><input type="hidden" name="action" value="resume"><button class="btn good" type="submit" ${model.kvConfigured?'':'disabled'}>Resume blocking now</button></form>`
+          : `<div class="actions"><form method="post" action="/admin/action"><input type="hidden" name="action" value="pause"><input type="hidden" name="seconds" value="30"><button class="btn" type="submit" ${model.kvConfigured?'':'disabled'}>Pause 30 sec</button></form><form method="post" action="/admin/action"><input type="hidden" name="action" value="pause"><input type="hidden" name="seconds" value="300"><button class="btn" type="submit" ${model.kvConfigured?'':'disabled'}>Pause 5 min</button></form><form method="post" action="/admin/action"><input type="hidden" name="action" value="pause"><input type="hidden" name="seconds" value="3600"><button class="btn" type="submit" ${model.kvConfigured?'':'disabled'}>Pause 1 hour</button></form></div>`) : ''}
         <form class="form" method="post" action="/admin/action"><input type="hidden" name="action" value="set-mode"><div class="field"><label>Block response</label><select name="blockMode">${['nxdomain','nodata','zero','refused'].map(x=>`<option${x===fw.blockMode?' selected':''}>${x}</option>`).join('')}</select></div><button class="btn" type="submit" ${model.kvConfigured?'':'disabled'}>Save mode</button></form>
       </section>
       <section class="card pad"><h2>Blocklist subscriptions</h2><div class="sub">HTTPS hosts/adblock/plain-domain lists. Refresh compiles them into 64 KV shards.</div>
