@@ -6,6 +6,7 @@ import {
   buildBlockedResponse,
   evaluateFirewall,
   getFirewallStatus,
+  mutateFirewall,
   parseBlocklist,
   refreshBlocklists
 } from '../src/firewall.js';
@@ -67,6 +68,31 @@ test('zero blocking returns 0.0.0.0 for A queries', () => {
   assert.equal(blocked.flags.rcodeName, 'NOERROR');
   assert.equal(blocked.answer.length, 1);
   assert.equal(blocked.answer[0].parsed.address, '0.0.0.0');
+});
+
+test('temporary pause bypasses deny rules and resume restores blocking', async () => {
+  const kv = new MemoryKv();
+  await kv.put('firewall:config:v1', JSON.stringify({ enabled: true, blockMode: 'nxdomain', allow: [], deny: ['ads.pause.example'], sources: [] }));
+  const env = { DNSDASH_KV: kv };
+  const query = buildDnsQuery('ads.pause.example', 'A', { id: 6, dnssec: false });
+  let decision = await evaluateFirewall(validateDnsQuery(query), env);
+  assert.equal(decision.blocked, true);
+
+  await mutateFirewall(env, 'pause', { seconds: '300' });
+  decision = await evaluateFirewall(validateDnsQuery(query), env);
+  assert.equal(decision.blocked, false);
+  assert.equal(decision.source, 'blocking-paused');
+  let status = await getFirewallStatus(env);
+  assert.equal(status.paused, true);
+  assert.equal(status.enabled, false);
+  assert.equal(status.configuredEnabled, true);
+
+  await mutateFirewall(env, 'resume', {});
+  decision = await evaluateFirewall(validateDnsQuery(query), env);
+  assert.equal(decision.blocked, true);
+  status = await getFirewallStatus(env);
+  assert.equal(status.paused, false);
+  assert.equal(status.enabled, true);
 });
 
 test('blocklist parser accepts hosts, domain and Adblock syntax', () => {
