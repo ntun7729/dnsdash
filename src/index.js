@@ -7,6 +7,7 @@ import {
   handleAdminAction,
   handleAdminLogin,
   handleAdminLogout,
+  isAdmin,
   queryLogModel
 } from './admin.js';
 import { cleanupOldQueries, getDashboardStats } from './analytics.js';
@@ -65,7 +66,9 @@ export default {
       if (url.pathname === '/api/resolve') return handleResolveApi(request, env);
       if (url.pathname === '/api/profile') return handleProfileApi(request, env);
       if (url.pathname === '/api/stats' && request.method === 'GET') {
-        return Response.json(await getDashboardStats(env, { hours: Number(url.searchParams.get('hours') || 24) }), { headers: { 'Cache-Control': 'no-store', ...SECURITY_HEADERS } });
+        const stats = await getDashboardStats(env, { hours: Number(url.searchParams.get('hours') || 24) });
+        const payload = await isAdmin(request, env) ? stats : redactDomainStats(stats);
+        return Response.json(payload, { headers: { 'Cache-Control': 'no-store', ...SECURITY_HEADERS } });
       }
       if (url.pathname === '/health' && request.method === 'GET') {
         return Response.json(await healthPayload(env), { headers: { 'Cache-Control': 'no-store', ...SECURITY_HEADERS } });
@@ -116,6 +119,15 @@ async function renderInspector(url, env) {
     result,
     error
   }));
+}
+
+function redactDomainStats(stats) {
+  if (!stats || typeof stats !== 'object') return stats;
+  return {
+    ...stats,
+    persistent: stats.persistent ? { ...stats.persistent, topDomains: [], topBlocked: [] } : stats.persistent,
+    runtime: stats.runtime ? { ...stats.runtime, topDomains: [], topBlocked: [] } : stats.runtime
+  };
 }
 
 function html(body) {
