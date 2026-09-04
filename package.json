@@ -1,9 +1,9 @@
 {
   "name": "dnsdash",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
-  "description": "Cloudflare Worker DNS-over-HTTPS resolver with server-rendered DNS dashboard, DNSSEC inspection and ECH analysis.",
+  "description": "Cloudflare Worker DNS firewall and DNS-over-HTTPS resolver with Pi-hole-style dashboard, query analytics, DNSSEC and ECH inspection.",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "build": "esbuild src/index.js --bundle --format=esm --platform=browser --target=es2022 --outfile=dist/_worker.js",
