@@ -8,6 +8,8 @@ import {
   validateDnsQuery,
   validateDnsResponse
 } from './wire.js';
+import { buildBlockedResponse, evaluateFirewall, getFirewallStatus } from './firewall.js';
+import { hashClient, logQuery } from './analytics.js';
 
 const DEFAULT_DOH = 'https://cloudflare-dns.com/dns-query';
 const MAX_DNS_MESSAGE = 65535;
@@ -17,13 +19,15 @@ const MAX_UPSTREAMS = 4;
 
 export { DNS_TYPES, parseDnsMessage, serviceBindingInspection, typeName } from './wire.js';
 
-export async function handleDoh(request, env = {}, fetcher = fetch) {
+export async function handleDoh(request, env = {}, fetcher = fetch, ctx = null) {
   if (request.method === 'OPTIONS') return corsPreflight('GET, POST, OPTIONS');
   if (request.method !== 'GET' && request.method !== 'POST') {
     return textResponse('Method Not Allowed', 405, { Allow: 'GET, POST, OPTIONS' });
   }
 
   let queryBytes;
+  let parsedQuery;
+  const started = Date.now();
   try {
     if (request.method === 'GET') {
       const url = new URL(request.url);
@@ -38,21 +42,73 @@ export async function handleDoh(request, env = {}, fetcher = fetch) {
       queryBytes = new Uint8Array(await request.arrayBuffer());
     }
     validateWireSize(queryBytes);
-    validateDnsQuery(queryBytes);
+    parsedQuery = validateDnsQuery(queryBytes);
   } catch (error) {
     return textResponse(error?.message || 'Invalid DNS query', statusFromError(error, 400));
   }
 
+  const question = parsedQuery.question[0];
+  let decision;
+  try {
+    decision = await evaluateFirewall(parsedQuery, env);
+  } catch (error) {
+    console.error('[dnsdash firewall]', error?.message || error);
+    decision = { blocked: false, action: 'allowed', source: 'firewall-error', domain: question?.name || '', qtype: question?.typeName || '' };
+  }
+
+  if (decision.blocked) {
+    const bytes = buildBlockedResponse(queryBytes, parsedQuery, decision.blockMode);
+    const parsed = parseDnsMessage(bytes);
+    const elapsedMs = Date.now() - started;
+    queueQueryLog(ctx, env, request, {
+      domain: decision.domain,
+      qtype: decision.qtype,
+      action: 'blocked',
+      source: decision.source,
+      resolver: 'local-firewall',
+      latencyMs: elapsedMs,
+      rcode: parsed.flags.rcodeName
+    });
+    const headers = baseHeaders({
+      'Content-Type': 'application/dns-message',
+      'Cache-Control': 'no-store',
+      'Server-Timing': `dns;dur=${elapsedMs}`,
+      'X-DNS-Upstream': 'local-firewall',
+      'X-DNS-Blocked': '1',
+      'X-DNS-Rule': safeHeader(decision.source)
+    });
+    return new Response(bytes, { status: 200, headers });
+  }
+
   try {
     const result = await resolveWire(queryBytes, env, fetcher);
+    queueQueryLog(ctx, env, request, {
+      domain: decision.domain,
+      qtype: decision.qtype,
+      action: 'allowed',
+      source: decision.source,
+      resolver: safeHostname(result.upstream),
+      latencyMs: Date.now() - started,
+      rcode: result.parsed.flags.rcodeName
+    });
     const headers = baseHeaders({
       'Content-Type': 'application/dns-message',
       'Cache-Control': result.cacheControl || cacheControlFromDns(result.parsed),
       'Server-Timing': `dns;dur=${result.elapsedMs}`,
-      'X-DNS-Upstream': safeHostname(result.upstream)
+      'X-DNS-Upstream': safeHostname(result.upstream),
+      'X-DNS-Blocked': '0'
     });
     return new Response(result.bytes, { status: 200, headers });
   } catch (error) {
+    queueQueryLog(ctx, env, request, {
+      domain: decision.domain,
+      qtype: decision.qtype,
+      action: 'error',
+      source: decision.source,
+      resolver: '',
+      latencyMs: Date.now() - started,
+      rcode: 'ERROR'
+    });
     return resolverFailure(error);
   }
 }
@@ -101,6 +157,7 @@ export async function handleProfileApi(request, env = {}, fetcher = fetch) {
     dnssecRequested: dnssec,
     records,
     errors,
+    firewallBlocked: Object.values(records).some(x => x?.blocked),
     summary: {
       ipv4: (records.A?.answers || []).filter(rr => rr.type === DNS_TYPES.A).map(rr => rr.parsed?.address).filter(Boolean),
       ipv6: (records.AAAA?.answers || []).filter(rr => rr.type === DNS_TYPES.AAAA).map(rr => rr.parsed?.address).filter(Boolean),
@@ -111,16 +168,18 @@ export async function handleProfileApi(request, env = {}, fetcher = fetch) {
   }, Object.keys(records).length ? 200 : 502);
 }
 
-export function healthPayload(env = {}) {
+export async function healthPayload(env = {}) {
   const upstreams = getUpstreams(env);
+  const firewall = await getFirewallStatus(env);
   return {
     ok: true,
     service: 'dnsdash',
-    version: '2.0.0',
+    version: '3.0.0',
     protocol: 'RFC 8484 DNS-over-HTTPS',
     upstreams: upstreams.map(safeHostname),
     timeoutMs: timeoutFromEnv(env),
-    features: ['wire-doh', 'dnssec-do', 'https-svcb', 'ech-rfc9849', 'profile']
+    firewall,
+    features: ['wire-doh', 'dnssec-do', 'https-svcb', 'ech-rfc9849', 'profile', 'dns-firewall', 'allow-deny', 'blocklist-subscriptions', 'query-analytics']
   };
 }
 
@@ -128,13 +187,31 @@ export async function resolveName({ name, type, dnssec = true, checkingDisabled 
   const normalizedType = typeof type === 'object' ? type : normalizeType(type);
   if (!normalizedType) throw httpError('Unsupported DNS type', 400);
   const queryBytes = buildDnsQuery(name, normalizedType.code, { dnssec, checkingDisabled });
-  const result = await resolveWire(queryBytes, env, fetcher);
+  const parsedQuery = validateDnsQuery(queryBytes);
+  const started = Date.now();
+  const decision = await evaluateFirewall(parsedQuery, env);
+  let result;
+  if (decision.blocked) {
+    const bytes = buildBlockedResponse(queryBytes, parsedQuery, decision.blockMode);
+    result = {
+      bytes,
+      parsed: parseDnsMessage(bytes),
+      upstream: 'local-firewall',
+      upstreamIndex: -1,
+      elapsedMs: Date.now() - started,
+      cacheControl: 'no-store'
+    };
+  } else {
+    result = await resolveWire(queryBytes, env, fetcher);
+  }
   const parsed = result.parsed;
   return {
     query: { name, type: normalizedType.name, code: normalizedType.code, dnssec, checkingDisabled },
-    resolver: safeHostname(result.upstream),
+    resolver: result.upstream === 'local-firewall' ? 'local-firewall' : safeHostname(result.upstream),
     upstreamIndex: result.upstreamIndex,
     elapsedMs: result.elapsedMs,
+    blocked: Boolean(decision.blocked),
+    firewall: { source: decision.source, blockMode: decision.blockMode || null },
     status: parsed.flags.rcode,
     statusName: rcodeName(parsed.flags.rcode),
     flags: parsed.flags,
@@ -201,11 +278,7 @@ export function decodeBase64Url(value) {
   const raw = text.replace(/=+$/, '').replace(/-/g, '+').replace(/_/g, '/');
   const padded = raw + '='.repeat((4 - raw.length % 4) % 4);
   let binary;
-  try {
-    binary = atob(padded);
-  } catch {
-    throw httpError('Invalid base64url DNS query', 400);
-  }
+  try { binary = atob(padded); } catch { throw httpError('Invalid base64url DNS query', 400); }
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
@@ -229,9 +302,7 @@ function normalizeUpstream(value) {
     if (url.protocol !== 'https:' || url.username || url.password) return '';
     url.hash = '';
     return url.toString();
-  } catch {
-    return '';
-  }
+  } catch { return ''; }
 }
 
 function normalizeType(value) {
@@ -247,9 +318,7 @@ function normalizeType(value) {
 
 function normalizeQueryName(value) {
   let raw = String(value || '').trim();
-  try {
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) raw = new URL(raw).hostname;
-  } catch {}
+  try { if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) raw = new URL(raw).hostname; } catch {}
   raw = raw.split(/[/?#]/, 1)[0].replace(/\.$/, '').toLowerCase();
   if (/[^\x00-\x7f]/.test(raw) && !raw.includes('_')) {
     try { raw = new URL(`https://${raw}`).hostname; } catch {}
@@ -264,16 +333,7 @@ function isValidDnsName(name) {
 }
 
 function recordForJson(rr) {
-  return {
-    name: rr.name,
-    type: rr.type,
-    typeName: rr.typeName,
-    class: rr.class,
-    ttl: rr.ttl,
-    rdlength: rr.rdlength,
-    data: rr.data,
-    parsed: rr.parsed
-  };
+  return { name: rr.name, type: rr.type, typeName: rr.typeName, class: rr.class, ttl: rr.ttl, rdlength: rr.rdlength, data: rr.data, parsed: rr.parsed };
 }
 
 function validateWireSize(bytes) {
@@ -295,62 +355,41 @@ function timeoutFromEnv(env) {
 async function fetchWithTimeout(fetcher, input, init, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetcher(input, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
+  try { return await fetcher(input, { ...init, signal: controller.signal }); }
+  finally { clearTimeout(timer); }
 }
 
-function mediaType(value) {
-  return String(value || '').split(';', 1)[0].trim().toLowerCase();
-}
-
-function safeHostname(value) {
-  try { return new URL(value).hostname; } catch { return 'resolver'; }
-}
-
-function statusFromError(error, fallback) {
-  const value = Number(error?.status);
-  return Number.isInteger(value) && value >= 400 && value <= 599 ? value : fallback;
-}
-
+function mediaType(value) { return String(value || '').split(';', 1)[0].trim().toLowerCase(); }
+function safeHostname(value) { try { return new URL(value).hostname; } catch { return String(value || 'resolver').slice(0, 120); } }
+function safeHeader(value) { return String(value || '').replace(/[\r\n]/g, '').slice(0, 180); }
+function statusFromError(error, fallback) { const value = Number(error?.status); return Number.isInteger(value) && value >= 400 && value <= 599 ? value : fallback; }
 function resolverFailure(error, json = false) {
   const status = statusFromError(error, error?.name === 'AbortError' ? 504 : 502);
   const message = status === 504 ? 'Resolver timeout' : 'Resolver unavailable';
   return json ? jsonResponse({ error: message, detail: error?.message || '' }, status) : textResponse(message, status);
 }
-
-function corsPreflight(methods) {
-  return new Response(null, { status: 204, headers: baseHeaders({ Allow: methods }) });
-}
-
+function corsPreflight(methods) { return new Response(null, { status: 204, headers: baseHeaders({ Allow: methods }) }); }
 function baseHeaders(extra = {}) {
   return new Headers({
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Accept',
-    'Access-Control-Expose-Headers': 'Server-Timing, X-DNS-Upstream',
+    'Access-Control-Expose-Headers': 'Server-Timing, X-DNS-Upstream, X-DNS-Blocked, X-DNS-Rule',
     'Access-Control-Max-Age': '86400',
     'X-Content-Type-Options': 'nosniff',
     ...extra
   });
 }
+function textResponse(message, status = 200, extra = {}) { return new Response(message, { status, headers: baseHeaders({ 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', ...extra }) }); }
+function jsonResponse(value, status = 200, extra = {}) { return new Response(JSON.stringify(value, null, 2), { status, headers: baseHeaders({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...extra }) }); }
+function httpError(message, status) { const error = new Error(message); error.status = status; return error; }
+function unique(values) { return [...new Set(values.filter(Boolean))]; }
 
-function textResponse(message, status = 200, extra = {}) {
-  return new Response(message, { status, headers: baseHeaders({ 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', ...extra }) });
-}
-
-function jsonResponse(value, status = 200, extra = {}) {
-  return new Response(JSON.stringify(value, null, 2), { status, headers: baseHeaders({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...extra }) });
-}
-
-function httpError(message, status) {
-  const error = new Error(message);
-  error.status = status;
-  return error;
-}
-
-function unique(values) {
-  return [...new Set(values.filter(Boolean))];
+function queueQueryLog(ctx, env, request, entry) {
+  const task = (async () => {
+    const clientHash = await hashClient(request, env);
+    await logQuery(env, { ...entry, clientHash });
+  })();
+  if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(task);
+  else task.catch(() => {});
 }
