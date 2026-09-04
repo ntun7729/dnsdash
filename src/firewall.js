@@ -9,6 +9,7 @@ const SHARD_CACHE_MS = 60000;
 const MAX_SOURCES = 8;
 const MAX_SOURCE_BYTES = 8 * 1024 * 1024;
 const MAX_GRAVITY_DOMAINS = 300000;
+const MAX_PAUSE_SECONDS = 24 * 3600;
 
 let configCache = { at: 0, value: null };
 const shardCache = new Map();
@@ -20,6 +21,7 @@ export function hasKv(env = {}) {
 export function defaultFirewallConfig(env = {}) {
   return {
     enabled: String(env.DNSDASH_BLOCKING ?? '1') !== '0',
+    disabledUntil: 0,
     blockMode: normalizeBlockMode(env.DNSDASH_BLOCK_MODE || 'nxdomain'),
     allow: parseRuleList(env.DNSDASH_ALLOW || ''),
     deny: parseRuleList(env.DNSDASH_DENY || ''),
@@ -58,8 +60,12 @@ export async function getFirewallStatus(env = {}) {
       if (meta && typeof meta === 'object') gravity = { ...gravity, ...meta };
     } catch {}
   }
+  const paused = config.enabled && config.disabledUntil > Date.now();
   return {
-    enabled: config.enabled,
+    enabled: config.enabled && !paused,
+    configuredEnabled: config.enabled,
+    paused,
+    disabledUntil: paused ? config.disabledUntil : 0,
     blockMode: config.blockMode,
     allowCount: config.allow.length,
     denyCount: config.deny.length,
@@ -80,6 +86,7 @@ export async function evaluateFirewall(parsedQuery, env = {}) {
   const allowedRule = matchRules(domain, config.allow);
   if (allowedRule) return { blocked: false, action: 'allowed', source: `allow:${allowedRule}`, domain, qtype };
   if (!config.enabled) return { blocked: false, action: 'allowed', source: 'blocking-disabled', domain, qtype };
+  if (config.disabledUntil > Date.now()) return { blocked: false, action: 'allowed', source: 'blocking-paused', domain, qtype };
 
   const deniedRule = matchRules(domain, config.deny);
   if (deniedRule) return { blocked: true, action: 'blocked', source: `deny:${deniedRule}`, domain, qtype, blockMode: config.blockMode };
@@ -134,8 +141,16 @@ export function buildBlockedResponse(queryBytes, parsedQuery, mode = 'nxdomain')
 
 export async function mutateFirewall(env, action, payload = {}) {
   const config = await getFirewallConfig(env, { fresh: true });
-  if (action === 'set-enabled') config.enabled = payload.enabled === true || payload.enabled === '1' || payload.enabled === 'true';
+  if (action === 'set-enabled') {
+    config.enabled = payload.enabled === true || payload.enabled === '1' || payload.enabled === 'true';
+    if (!config.enabled) config.disabledUntil = 0;
+  }
   else if (action === 'set-mode') config.blockMode = normalizeBlockMode(payload.blockMode);
+  else if (action === 'pause') {
+    const seconds = Math.max(1, Math.min(MAX_PAUSE_SECONDS, Math.trunc(Number(payload.seconds) || 0)));
+    config.disabledUntil = Date.now() + seconds * 1000;
+  }
+  else if (action === 'resume') config.disabledUntil = 0;
   else if (action === 'add-allow') config.allow = addRule(config.allow, payload.rule);
   else if (action === 'remove-allow') config.allow = removeRule(config.allow, payload.rule);
   else if (action === 'add-deny') config.deny = addRule(config.deny, payload.rule);
@@ -239,11 +254,18 @@ function sanitizeConfig(raw, base) {
   const source = raw && typeof raw === 'object' ? raw : {};
   return {
     enabled: source.enabled == null ? base.enabled : Boolean(source.enabled),
+    disabledUntil: sanitizeDisabledUntil(source.disabledUntil),
     blockMode: normalizeBlockMode(source.blockMode || base.blockMode),
     allow: uniqueRules([...(base.allow || []), ...asArray(source.allow)]).slice(0, 2000),
     deny: uniqueRules([...(base.deny || []), ...asArray(source.deny)]).slice(0, 5000),
     sources: asArray(source.sources).map(sanitizeSource).filter(Boolean).slice(0, MAX_SOURCES)
   };
+}
+
+function sanitizeDisabledUntil(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= Date.now()) return 0;
+  return Math.min(n, Date.now() + MAX_PAUSE_SECONDS * 1000);
 }
 
 function sanitizeSource(source) {
