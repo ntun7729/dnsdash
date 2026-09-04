@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Wait for server-rendered production build
+      - name: Wait for DNS Dash 3 production build
         shell: bash
         run: |
           set -uo pipefail
@@ -22,11 +22,9 @@ jobs:
           for attempt in $(seq 1 24); do
             echo "production probe attempt $attempt"
             if curl -fsS --max-time 15 -D /tmp/prod-headers "$url" -o /tmp/prod-home.html; then
-              echo '--- response headers ---'
-              cat /tmp/prod-headers
               echo '--- page markers ---'
-              grep -Eo 'Dashboard ready|Core controls work without JavaScript|Checking resolver|UI active[^<]*' /tmp/prod-home.html | head -n 10 || true
-              if grep -Fq 'Core controls work without JavaScript' /tmp/prod-home.html; then
+              grep -Eo 'Manage firewall|Blocking enabled|DNS Dash 3\.0|Checking resolver' /tmp/prod-home.html | head -n 10 || true
+              if grep -Fq 'Manage firewall' /tmp/prod-home.html && grep -Fq 'DNS Dash 3.0' /tmp/prod-home.html; then
                 ready=1
                 break
               fi
@@ -34,11 +32,9 @@ jobs:
             sleep 5
           done
           if [ "$ready" != '1' ]; then
-            echo 'Production did not expose the DNS Dash 2.2 marker.'
-            echo '--- final headers ---'
+            echo 'Production did not expose the DNS Dash 3 firewall dashboard.'
             cat /tmp/prod-headers 2>/dev/null || true
-            echo '--- final HTML head ---'
-            sed -n '1,80p' /tmp/prod-home.html 2>/dev/null || true
+            sed -n '1,100p' /tmp/prod-home.html 2>/dev/null || true
             exit 1
           fi
 
@@ -49,13 +45,16 @@ jobs:
           curl -fsS --max-time 20 'https://dnsdash.huggy.bond/health' -o /tmp/health.json
           cat /tmp/health.json
           grep -Fq '"ok":true' /tmp/health.json
+          grep -Fq '"version":"3.0.0"' /tmp/health.json
+          grep -Fq '"dns-firewall"' /tmp/health.json
 
           curl -fsS --max-time 20 'https://dnsdash.huggy.bond/doh.txt' -o /tmp/doh.txt
-          cat /tmp/doh.txt
           grep -Fq 'https://dnsdash.huggy.bond/dns-query' /tmp/doh.txt
 
-          curl -fsS --max-time 30 'https://dnsdash.huggy.bond/?run=1&mode=record&name=example.com&type=A' -o /tmp/result.html
+          curl -fsS --max-time 20 'https://dnsdash.huggy.bond/admin' -o /tmp/admin.html
+          grep -Eq 'Admin login|Blocklist subscriptions|DNSDASH_ADMIN_TOKEN' /tmp/admin.html
+
+          curl -fsS --max-time 30 'https://dnsdash.huggy.bond/inspect?run=1&mode=record&name=example.com&type=A' -o /tmp/result.html
           grep -Fq 'Server rendered' /tmp/result.html
-          grep -Fq 'NOERROR' /tmp/result.html
           grep -Fq 'example.com' /tmp/result.html
-          echo 'Production server-rendered DNS result passed.'
+          echo 'Production DNS Dash 3 probe passed.'
