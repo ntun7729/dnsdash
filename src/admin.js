@@ -52,13 +52,14 @@ export async function handleAdminAction(request, env = {}, ctx = null) {
   const action = String(form.get('action') || '');
   let message = 'Saved';
   try {
-    if (['set-enabled','set-mode','add-allow','remove-allow','add-deny','remove-deny','add-source','toggle-source','remove-source'].includes(action)) {
+    if (['set-enabled','set-mode','pause','resume','add-allow','remove-allow','add-deny','remove-deny','add-source','toggle-source','remove-source'].includes(action)) {
       const payload = Object.fromEntries(form.entries());
       await mutateFirewall(env, action, payload);
-      message = action.replace(/-/g, ' ');
+      if (action === 'pause') message = `Blocking paused for ${Math.max(1, Math.trunc(Number(payload.seconds) || 0))} seconds`;
+      else if (action === 'resume') message = 'Blocking resumed';
+      else message = action.replace(/-/g, ' ');
     } else if (action === 'refresh-sources') {
-      const task = refreshBlocklists(env);
-      const meta = await task;
+      const meta = await refreshBlocklists(env);
       message = `Blocklists refreshed: ${meta.domains} domains`;
     } else if (action === 'clear-log') {
       await clearQueryLog(env);
