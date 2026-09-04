@@ -75,7 +75,7 @@ test('admin page exposes Pi-hole controls after authentication', () => {
   assert.match(html, /Blocklist subscriptions/);
   assert.match(html, /Allowlist/);
   assert.match(html, /Denylist/);
-  assert.match(html, /Refresh &amp; compile lists/);
+  assert.match(html, /Refresh & compile lists/);
   assert.match(html, /ads\.example/);
   assert.match(html, /clear-log/);
 });
